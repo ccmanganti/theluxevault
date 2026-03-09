@@ -1,0 +1,40 @@
+{
+    "name": "stechstudio/filament-impersonate",
+    "description": "A Filament package to impersonate your users.",
+    "type": "library",
+    "minimum-stability": "dev",
+    "license": "MIT",
+    "require": {
+        "filament/filament": "^4.0|^5.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^10.0",
+        "pestphp/pest": "^3.0",
+        "pestphp/pest-plugin-laravel": "^3.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "STS\\FilamentImpersonate\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "STS\\FilamentImpersonate\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "STS\\FilamentImpersonate\\FilamentImpersonateServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "test": "pest"
+    },
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    }
+}

@@ -8,11 +8,15 @@ use App\Filament\Resources\Products\Pages\ListProducts;
 use App\Filament\Resources\Products\Pages\ViewProduct;
 use App\Filament\Resources\Products\Schemas\ProductInfolist;
 use App\Models\Attribute;
+use App\Models\Category;
 use App\Models\Product;
 use App\Models\Warehouse;
 use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Actions\ActionGroup;
+use Filament\Actions\BulkAction;
+use Filament\Actions\BulkActionGroup;
+use Filament\Actions\DeleteBulkAction;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
@@ -28,10 +32,13 @@ use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\ToggleColumn;
+use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Str;
-use UnitEnum;
 
 class ProductResource extends Resource
 {
@@ -39,7 +46,7 @@ class ProductResource extends Resource
 
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedRectangleGroup;
     protected static string|BackedEnum|null $activeNavigationIcon = Heroicon::RectangleGroup;
-    protected static string|UnitEnum|null $navigationGroup = 'Warehouse Management';
+    protected static string|\UnitEnum|null $navigationGroup = 'Warehouse Management';
 
     protected static function userOwnsProduct(?Product $record): bool
     {
@@ -60,10 +67,13 @@ class ProductResource extends Resource
                             Select::make('warehouse_id')
                                 ->label('Warehouse')
                                 ->options(function (): array {
-                                    return Warehouse::query()
-                                        ->where('user_id', auth()->id())
-                                        ->pluck('name', 'id')
-                                        ->toArray();
+                                    $query = Warehouse::query()->orderBy('name');
+
+                                    if (! auth()->user()?->hasRole('Superadmin')) {
+                                        $query->where('user_id', auth()->id());
+                                    }
+
+                                    return $query->pluck('name', 'id')->toArray();
                                 })
                                 ->required()
                                 ->searchable()
@@ -205,11 +215,21 @@ class ProductResource extends Resource
                             ->directory('products')
                             ->visibility('public')
                             ->image()
+                            ->acceptedFileTypes(['image/*'])
+                            ->extraInputAttributes([
+                                'accept' => 'image/*',
+                                'capture' => 'environment', // rear camera on supported phones
+                            ])
                             ->maxFiles(10)
-                            ->imagePreviewHeight('100')
+                            ->imagePreviewHeight('150')
                             ->panelLayout('grid')
                             ->reorderable()
                             ->preserveFilenames()
+                            ->imageEditor()
+                            ->imageEditorAspectRatios([
+                                '4:3',
+                            ])
+                            ->helperText('On supported phones, this can open the camera directly.')
                             ->columnSpanFull(),
                     ]),
 
@@ -247,12 +267,14 @@ class ProductResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
+            ->defaultSort('name')
             ->columns([
                 TextColumn::make('warehouse.user.name')
                     ->label('Owner')
                     ->searchable()
                     ->sortable()
                     ->placeholder('-')
+                    ->toggleable(isToggledHiddenByDefault: true)
                     ->visible(fn () => auth()->user()?->hasRole('Superadmin')),
 
                 ImageColumn::make('images')
@@ -278,11 +300,19 @@ class ProductResource extends Resource
                 TextColumn::make('brand')
                     ->searchable()
                     ->sortable()
-                    ->placeholder('-'),
+                    ->placeholder('-')
+                    ->toggleable(),
 
                 ToggleColumn::make('is_active')
                     ->label('Active')
                     ->disabled(fn (Product $record): bool => ! static::userOwnsProduct($record)),
+
+                TextColumn::make('is_featured')
+                    ->label('Featured')
+                    ->formatStateUsing(fn (bool $state): string => $state ? 'Yes' : 'No')
+                    ->badge()
+                    ->color(fn (bool $state): string => $state ? 'warning' : 'gray')
+                    ->toggleable(),
 
                 TextColumn::make('selling_price')
                     ->label('Price')
@@ -292,16 +322,136 @@ class ProductResource extends Resource
                 TextColumn::make('sku')
                     ->label('SKU')
                     ->searchable()
-                    ->sortable(),
+                    ->sortable()
+                    ->toggleable(),
+
+                TextColumn::make('barcode')
+                    ->label('Barcode')
+                    ->searchable()
+                    ->sortable()
+                    ->placeholder('-')
+                    ->toggleable(isToggledHiddenByDefault: true),
 
                 TextColumn::make('stock')
                     ->label('Quantity')
                     ->sortable(),
+
+                TextColumn::make('reserved_stock')
+                    ->label('Reserved')
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('damaged_stock')
+                    ->label('Damaged')
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('warehouse.name')
+                    ->label('Warehouse')
+                    ->sortable()
+                    ->searchable()
+                    ->toggleable(),
             ])
+            ->filters([
+                SelectFilter::make('warehouse_id')
+                    ->label('Warehouse')
+                    ->options(function (): array {
+                        $query = Warehouse::query()->orderBy('name');
+
+                        if (! auth()->user()?->hasRole('Superadmin')) {
+                            $query->where('user_id', auth()->id());
+                        }
+
+                        return $query->pluck('name', 'id')->toArray();
+                    })
+                    ->searchable()
+                    ->preload(),
+
+                SelectFilter::make('category')
+                    ->label('Category')
+                    ->relationship(
+                        'categories',
+                        'name',
+                        fn (Builder $query) => $query->orderBy('name')
+                    )
+                    ->searchable()
+                    ->preload(),
+
+                TernaryFilter::make('is_active')
+                    ->label('Active'),
+
+                TernaryFilter::make('is_featured')
+                    ->label('Featured'),
+
+                Filter::make('in_stock')
+                    ->label('In stock only')
+                    ->query(fn (Builder $query): Builder => $query->where('stock', '>', 0)),
+
+                Filter::make('out_of_stock')
+                    ->label('Out of stock')
+                    ->query(fn (Builder $query): Builder => $query->where('stock', '<=', 0)),
+            ])
+            ->filtersFormColumns(3)
             ->recordActions([
                 ActionGroup::make([
+                    Action::make('quickEdit')
+                        ->label('Quick edit')
+                        ->icon('heroicon-o-pencil-square')
+                        ->color('primary')
+                        ->disabled(fn (Product $record): bool => ! static::userOwnsProduct($record))
+                        ->fillForm(fn (Product $record): array => [
+                            'name' => $record->name,
+                            'brand' => $record->brand,
+                            'selling_price' => $record->selling_price,
+                            'stock' => $record->stock,
+                            'sku' => $record->sku,
+                            'is_active' => $record->is_active,
+                            'is_featured' => $record->is_featured,
+                        ])
+                        ->schema([
+                            Grid::make(2)->schema([
+                                TextInput::make('name')
+                                    ->required()
+                                    ->maxLength(255),
+
+                                TextInput::make('brand')
+                                    ->maxLength(255),
+
+                                TextInput::make('selling_price')
+                                    ->label('Price')
+                                    ->numeric()
+                                    ->prefix('$'),
+
+                                TextInput::make('stock')
+                                    ->numeric(),
+
+                                TextInput::make('sku')
+                                    ->maxLength(100),
+
+                                Grid::make(2)->schema([
+                                    Toggle::make('is_active')
+                                        ->label('Active'),
+
+                                    Toggle::make('is_featured')
+                                        ->label('Featured'),
+                                ])->columnSpanFull(),
+                            ]),
+                        ])
+                        ->modalHeading(fn (Product $record): string => "Quick edit: {$record->name}")
+                        ->action(function (Product $record, array $data): void {
+                            $record->update([
+                                'name' => $data['name'],
+                                'brand' => $data['brand'] ?? null,
+                                'selling_price' => $data['selling_price'] ?? null,
+                                'stock' => $data['stock'] ?? 0,
+                                'sku' => $data['sku'] ?? null,
+                                'is_active' => (bool) ($data['is_active'] ?? false),
+                                'is_featured' => (bool) ($data['is_featured'] ?? false),
+                            ]);
+                        }),
+
                     Action::make('edit')
-                        ->label('Edit')
+                        ->label('Full edit')
                         ->icon('heroicon-o-pencil-square')
                         ->url(fn (Product $record): string => static::getUrl('edit', ['record' => $record]))
                         ->disabled(fn (Product $record): bool => ! static::userOwnsProduct($record)),
@@ -312,7 +462,7 @@ class ProductResource extends Resource
                         ->color('gray')
                         ->requiresConfirmation()
                         ->disabled(fn (Product $record): bool => ! static::userOwnsProduct($record))
-                        ->action(function (Product $record) {
+                        ->action(function (Product $record): void {
                             $record->update([
                                 'is_active' => ! $record->is_active,
                             ]);
@@ -323,7 +473,7 @@ class ProductResource extends Resource
                         ->icon('heroicon-o-currency-dollar')
                         ->color('warning')
                         ->disabled(fn (Product $record): bool => ! static::userOwnsProduct($record))
-                        ->form([
+                        ->schema([
                             TextInput::make('selling_price')
                                 ->label('New price')
                                 ->numeric()
@@ -332,7 +482,7 @@ class ProductResource extends Resource
                         ->fillForm(fn (Product $record): array => [
                             'selling_price' => $record->selling_price,
                         ])
-                        ->action(function (Product $record, array $data) {
+                        ->action(function (Product $record, array $data): void {
                             $record->update([
                                 'selling_price' => $data['selling_price'],
                             ]);
@@ -343,7 +493,7 @@ class ProductResource extends Resource
                         ->icon('heroicon-o-arrow-path')
                         ->color('primary')
                         ->disabled(fn (Product $record): bool => ! static::userOwnsProduct($record))
-                        ->form([
+                        ->schema([
                             TextInput::make('stock')
                                 ->label('New stock quantity')
                                 ->numeric()
@@ -352,7 +502,7 @@ class ProductResource extends Resource
                         ->fillForm(fn (Product $record): array => [
                             'stock' => $record->stock,
                         ])
-                        ->action(function (Product $record, array $data) {
+                        ->action(function (Product $record, array $data): void {
                             $record->update([
                                 'stock' => $data['stock'],
                             ]);
@@ -371,6 +521,48 @@ class ProductResource extends Resource
                     ->button()
                     ->size('sm')
                     ->color('gray'),
+            ])
+            ->bulkActions([
+                BulkActionGroup::make([
+                    BulkAction::make('activateSelected')
+                        ->label('Activate selected')
+                        ->icon('heroicon-o-eye')
+                        ->color('success')
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records): void {
+                            $records
+                                ->filter(fn (Product $record) => static::userOwnsProduct($record))
+                                ->each
+                                ->update(['is_active' => true]);
+                        }),
+
+                    BulkAction::make('deactivateSelected')
+                        ->label('Deactivate selected')
+                        ->icon('heroicon-o-eye-slash')
+                        ->color('warning')
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records): void {
+                            $records
+                                ->filter(fn (Product $record) => static::userOwnsProduct($record))
+                                ->each
+                                ->update(['is_active' => false]);
+                        }),
+
+                    BulkAction::make('markFeatured')
+                        ->label('Mark featured')
+                        ->icon('heroicon-o-star')
+                        ->color('warning')
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records): void {
+                            $records
+                                ->filter(fn (Product $record) => static::userOwnsProduct($record))
+                                ->each
+                                ->update(['is_featured' => true]);
+                        }),
+
+                    DeleteBulkAction::make()
+                        ->visible(fn (): bool => true),
+                ]),
             ]);
     }
 

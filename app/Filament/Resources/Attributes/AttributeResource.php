@@ -10,22 +10,28 @@ use App\Filament\Resources\Attributes\Schemas\AttributeInfolist;
 use App\Models\Attribute;
 use App\Models\Warehouse;
 use BackedEnum;
-use Filament\Actions\EditAction;
-use Filament\Actions\ViewAction;
+use Filament\Actions\Action;
+use Filament\Actions\ActionGroup;
+use Filament\Actions\BulkAction;
+use Filament\Actions\BulkActionGroup;
+use Filament\Actions\DeleteBulkAction;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Resources\Resource;
+use Filament\Schemas\Components\Grid;
+use Filament\Schemas\Components\Section;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
-use Illuminate\Support\Str;
-use Filament\Schemas\Components\Section;
-use Filament\Schemas\Components\Grid;
-use UnitEnum;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Str;
+use UnitEnum;
 
 class AttributeResource extends Resource
 {
@@ -55,10 +61,13 @@ class AttributeResource extends Resource
                             Select::make('warehouse_id')
                                 ->label('Warehouse')
                                 ->options(function (): array {
-                                    return Warehouse::query()
-                                        ->where('user_id', auth()->id())
-                                        ->pluck('name', 'id')
-                                        ->toArray();
+                                    $query = Warehouse::query()->orderBy('name');
+
+                                    if (! auth()->user()?->hasRole('Superadmin')) {
+                                        $query->where('user_id', auth()->id());
+                                    }
+
+                                    return $query->pluck('name', 'id')->toArray();
                                 })
                                 ->required()
                                 ->searchable()
@@ -163,26 +172,37 @@ class AttributeResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
+            ->defaultSort('sort_order')
             ->columns([
                 TextColumn::make('warehouse.user.name')
                     ->label('Owner')
                     ->searchable()
+                    ->sortable()
                     ->visible(fn () => auth()->user()?->hasRole('Superadmin'))
-                    ->placeholder('-'),
+                    ->placeholder('-')
+                    ->toggleable(isToggledHiddenByDefault: true),
 
                 TextColumn::make('name')
                     ->label('Attribute')
                     ->searchable()
-                    ->sortable(),
+                    ->sortable()
+                    ->weight('medium'),
 
                 TextColumn::make('warehouse.name')
                     ->label('Warehouse')
                     ->searchable()
-                    ->sortable(),
+                    ->sortable()
+                    ->toggleable(),
+
+                TextColumn::make('slug')
+                    ->searchable()
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
 
                 TextColumn::make('type')
                     ->badge()
                     ->sortable()
+                    ->formatStateUsing(fn (?string $state): string => str($state)->replace('_', ' ')->title())
                     ->description(fn ($record) => match ($record->type) {
                         'text' => 'Plain text value',
                         'number' => 'Numeric value',
@@ -199,36 +219,243 @@ class AttributeResource extends Resource
 
                 IconColumn::make('is_required')
                     ->label('Required')
-                    ->boolean(),
+                    ->boolean()
+                    ->toggleable(),
 
                 IconColumn::make('is_filterable')
                     ->label('Filterable')
-                    ->boolean(),
+                    ->boolean()
+                    ->toggleable(),
 
                 IconColumn::make('is_variant')
                     ->label('Variant')
-                    ->boolean(),
+                    ->boolean()
+                    ->toggleable(),
 
                 TextColumn::make('status')
                     ->badge()
                     ->color(fn (string $state): string => match ($state) {
                         'active' => 'success',
-                        'inactive' => 'danger',
+                        'inactive' => 'gray',
                         default => 'gray',
                     }),
 
                 TextColumn::make('sort_order')
                     ->label('Sort')
                     ->sortable()
-                    ->tooltip('Lower numbers are shown first.'),
-            ])
-            ->recordActions([
-                ViewAction::make()
-                    ->icon(Heroicon::OutlinedEye),
+                    ->tooltip('Lower numbers are shown first.')
+                    ->toggleable(),
 
-                EditAction::make()
-                    ->icon(Heroicon::OutlinedPencilSquare)
-                    ->disabled(fn (Attribute $record): bool => ! static::userOwnsAttribute($record)),
+                TextColumn::make('created_at')
+                    ->dateTime('M d, Y')
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('updated_at')
+                    ->dateTime('M d, Y')
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+            ])
+            ->filters([
+                SelectFilter::make('warehouse_id')
+                    ->label('Warehouse')
+                    ->options(function (): array {
+                        $query = Warehouse::query()->orderBy('name');
+
+                        if (! auth()->user()?->hasRole('Superadmin')) {
+                            $query->where('user_id', auth()->id());
+                        }
+
+                        return $query->pluck('name', 'id')->toArray();
+                    })
+                    ->searchable()
+                    ->preload(),
+
+                SelectFilter::make('type')
+                    ->label('Type')
+                    ->options([
+                        'text' => 'Text',
+                        'number' => 'Number',
+                        'select' => 'Select',
+                        'boolean' => 'Boolean',
+                        'textarea' => 'Textarea',
+                        'date' => 'Date',
+                    ]),
+
+                SelectFilter::make('status')
+                    ->label('Status')
+                    ->options([
+                        'active' => 'Active',
+                        'inactive' => 'Inactive',
+                    ]),
+
+                TernaryFilter::make('is_required')
+                    ->label('Required'),
+
+                TernaryFilter::make('is_filterable')
+                    ->label('Filterable'),
+
+                TernaryFilter::make('is_variant')
+                    ->label('Variant'),
+            ])
+            ->filtersFormColumns(3)
+            ->recordActions([
+                ActionGroup::make([
+                    Action::make('view')
+                        ->label('View')
+                        ->icon('heroicon-o-eye')
+                        ->url(fn (Attribute $record): string => static::getUrl('view', ['record' => $record])),
+
+                    Action::make('quickEdit')
+                        ->label('Quick edit')
+                        ->icon('heroicon-o-pencil-square')
+                        ->color('primary')
+                        ->disabled(fn (Attribute $record): bool => ! static::userOwnsAttribute($record))
+                        ->fillForm(fn (Attribute $record): array => [
+                            'name' => $record->name,
+                            'type' => $record->type,
+                            'unit' => $record->unit,
+                            'sort_order' => $record->sort_order,
+                            'is_required' => $record->is_required,
+                            'is_filterable' => $record->is_filterable,
+                            'is_variant' => $record->is_variant,
+                            'status' => $record->status,
+                        ])
+                        ->schema([
+                            Grid::make(2)->schema([
+                                TextInput::make('name')
+                                    ->required()
+                                    ->maxLength(255),
+
+                                Select::make('type')
+                                    ->required()
+                                    ->options([
+                                        'text' => 'Text',
+                                        'number' => 'Number',
+                                        'select' => 'Select',
+                                        'boolean' => 'Boolean',
+                                        'textarea' => 'Textarea',
+                                        'date' => 'Date',
+                                    ]),
+
+                                TextInput::make('unit')
+                                    ->maxLength(50),
+
+                                TextInput::make('sort_order')
+                                    ->numeric()
+                                    ->default(0),
+
+                                Toggle::make('is_required')
+                                    ->label('Required'),
+
+                                Toggle::make('is_filterable')
+                                    ->label('Filterable'),
+
+                                Toggle::make('is_variant')
+                                    ->label('Used for Variants'),
+
+                                Select::make('status')
+                                    ->required()
+                                    ->options([
+                                        'active' => 'Active',
+                                        'inactive' => 'Inactive',
+                                    ])
+                                    ->columnSpanFull(),
+                            ]),
+                        ])
+                        ->modalHeading(fn (Attribute $record): string => "Quick edit: {$record->name}")
+                        ->action(function (Attribute $record, array $data): void {
+                            $record->update([
+                                'name' => $data['name'],
+                                'slug' => Str::slug($data['name']),
+                                'type' => $data['type'],
+                                'unit' => $data['unit'] ?? null,
+                                'sort_order' => $data['sort_order'] ?? 0,
+                                'is_required' => (bool) ($data['is_required'] ?? false),
+                                'is_filterable' => (bool) ($data['is_filterable'] ?? false),
+                                'is_variant' => (bool) ($data['is_variant'] ?? false),
+                                'status' => $data['status'],
+                            ]);
+                        }),
+
+                    Action::make('edit')
+                        ->label('Full edit')
+                        ->icon('heroicon-o-pencil-square')
+                        ->url(fn (Attribute $record): string => static::getUrl('edit', ['record' => $record]))
+                        ->disabled(fn (Attribute $record): bool => ! static::userOwnsAttribute($record)),
+
+                    Action::make('activate')
+                        ->label('Set active')
+                        ->icon('heroicon-o-check-circle')
+                        ->color('success')
+                        ->requiresConfirmation()
+                        ->disabled(fn (Attribute $record): bool => ! static::userOwnsAttribute($record))
+                        ->visible(fn (Attribute $record): bool => $record->status !== 'active')
+                        ->action(fn (Attribute $record) => $record->update(['status' => 'active'])),
+
+                    Action::make('deactivate')
+                        ->label('Set inactive')
+                        ->icon('heroicon-o-x-circle')
+                        ->color('gray')
+                        ->requiresConfirmation()
+                        ->disabled(fn (Attribute $record): bool => ! static::userOwnsAttribute($record))
+                        ->visible(fn (Attribute $record): bool => $record->status !== 'inactive')
+                        ->action(fn (Attribute $record) => $record->update(['status' => 'inactive'])),
+
+                    Action::make('delete')
+                        ->label('Delete')
+                        ->icon('heroicon-o-trash')
+                        ->color('danger')
+                        ->requiresConfirmation()
+                        ->disabled(fn (Attribute $record): bool => ! static::userOwnsAttribute($record))
+                        ->action(fn (Attribute $record) => $record->delete()),
+                ])
+                    ->label('')
+                    ->icon('heroicon-o-ellipsis-vertical')
+                    ->button()
+                    ->size('sm')
+                    ->color('gray'),
+            ])
+            ->bulkActions([
+                BulkActionGroup::make([
+                    BulkAction::make('setActive')
+                        ->label('Set active')
+                        ->icon('heroicon-o-check-circle')
+                        ->color('success')
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records): void {
+                            $records
+                                ->filter(fn (Attribute $record) => static::userOwnsAttribute($record))
+                                ->each
+                                ->update(['status' => 'active']);
+                        }),
+
+                    BulkAction::make('setInactive')
+                        ->label('Set inactive')
+                        ->icon('heroicon-o-x-circle')
+                        ->color('gray')
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records): void {
+                            $records
+                                ->filter(fn (Attribute $record) => static::userOwnsAttribute($record))
+                                ->each
+                                ->update(['status' => 'inactive']);
+                        }),
+
+                    BulkAction::make('setFilterable')
+                        ->label('Mark filterable')
+                        ->icon('heroicon-o-funnel')
+                        ->color('info')
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records): void {
+                            $records
+                                ->filter(fn (Attribute $record) => static::userOwnsAttribute($record))
+                                ->each
+                                ->update(['is_filterable' => true]);
+                        }),
+
+                    DeleteBulkAction::make(),
+                ]),
             ]);
     }
 

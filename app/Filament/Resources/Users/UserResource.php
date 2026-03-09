@@ -20,6 +20,7 @@ use Filament\Tables\Table;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Grid;
 use UnitEnum;
+use STS\FilamentImpersonate\Actions\Impersonate;
 
 class UserResource extends Resource
 {
@@ -94,6 +95,11 @@ class UserResource extends Resource
 
                 EditAction::make()
                     ->icon(Heroicon::OutlinedPencilSquare),
+                
+                Impersonate::make()
+                ->visible(fn (User $record) => auth()->id() !== $record->id
+                    && auth()->user()?->hasRole('Superadmin'))
+                ->redirectTo('/admin')
             ]);
     }
 
